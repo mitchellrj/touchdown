@@ -35,6 +35,10 @@ setup(
         'fuselage>=0.0.6',
         'botocore>=0.107.0',
     ],
+    extras_require={
+        # Optional algorithm support
+        'sql': ['SQLAlchemy>=1.0.0'],
+    },
     entry_points='''
         [console_scripts]
         touchdown = touchdown.core.main:main

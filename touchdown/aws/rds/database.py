@@ -12,10 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from six.moves.urllib.parse import urlunparse
+try:
+    from sqlalchemy import create_engine
+    HAVE_SQLALCHEMY = True
+except ImportError:
+    HAVE_SQLALCHEMY = False
+
 from touchdown.core.resource import Resource
 from touchdown.core.plan import Plan, Present
 from touchdown.core import argument, serializers
 from touchdown.core.errors import InvalidParameter
+from touchdown.core.errors import InvalidPlan
 
 from ..account import Account
 from ..common import SimpleDescribe, SimpleApply, SimpleDestroy
@@ -55,6 +63,8 @@ class Database(Resource):
     preferred_backup_window = argument.String(field="PreferredBackupWindow")
     license_model = argument.String(field="LicenseModel")
     port = argument.Integer(min=1, max=32768, field="Port")
+    # could be a string, could be an SQLAlchemy construct
+    run_sql = argument.Argument()
     # paramter_group = argument.Resource(ParameterGroup, field="DBParameterGroupName")
     # option_group = argument.Resource(OptionGroup, field="OptionGroupName")
     apply_immediately = argument.Boolean(field="ApplyImmediately", aws_create=False)
@@ -90,6 +100,24 @@ class Describe(SimpleDescribe, Plan):
     describe_envelope = "DBInstances"
     key = 'DBInstanceIdentifier'
 
+    def run_sql(self, **kwargs):
+        if not self.resource.publically_accessible:
+            raise InvalidPlan('Cannot run SQL on a database that is not '
+                              'publicly accessible.')
+        if not HAVE_SQLALCHEMY:
+            raise RuntimeError('SQLAlchemy is required to run SQL queries.')
+
+    def get_actions(self):
+        for action in super().get_actions():
+            yield action
+
+        if self.resource.run_sql and self.object:
+            run_sql = self.generic_action(
+                "Run SQL on {}: {}".format(self.object, self.resource.run_sql),
+                self.run_sql
+            )
+            yield run_sql
+
 
 class Apply(SimpleApply, Describe):
 
@@ -105,6 +133,30 @@ class Apply(SimpleApply, Describe):
         Present("master_username"),
         Present("master_password"),
     )
+
+    def get_url(self):
+        host_part = '{0}:{1}@{2}'.format(
+            self.object['MasterUsername'],
+            self.resource.master_password,
+            self.object['Endpoint']
+            )
+        return urlunparse((
+            self.object['Engine'].lower(),
+            host_part,
+            self.object['DBName'],
+            '',
+            '',
+            ''
+            ))
+
+    def run_sql(self, **kwargs):
+        super().run_sql(**kwargs)
+        url = self.get_url()
+        engine = create_engine(url)
+        with engine.connect() as connection:
+            with connection.begin():
+                # Run in a transaction
+                connection.execute(self.resource.run_sql)
 
 
 class Destroy(SimpleDestroy, Describe):
